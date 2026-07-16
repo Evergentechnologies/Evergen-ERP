@@ -216,54 +216,78 @@
       return (rows || []).map(row => row.data || row);
     }
 
-    async function fetchERPData() {
-      const tableNames = [
-        "orders",
-        "customers",
-        "products",
-        "documents",
-        "payments",
-        "production",
-        "shipments",
-        "audit_logs",
-        "app_settings"
-      ];
+    const DEFAULT_SETTINGS = {
+      companyName: "Evergen Technologies Co., Ltd.",
+      taxId: "0105562089410",
+      prefix: "EVG-202502-"
+    };
+
+    const GUEST_ALLOWED_ROUTES = new Set([
+      "dashboard",
+      "orders",
+      "order_detail",
+      "customers",
+      "products",
+      "production",
+      "shipping"
+    ]);
+
+    async function fetchERPData(role) {
+      const isAdmin = role === "Admin";
+
+      // Guest only requests tables permitted by the Supabase RLS policies.
+      const tableNames = isAdmin
+        ? [
+            "orders",
+            "customers",
+            "products",
+            "documents",
+            "payments",
+            "production",
+            "shipments",
+            "audit_logs",
+            "app_settings"
+          ]
+        : [
+            "orders",
+            "customers",
+            "products",
+            "production",
+            "shipments"
+          ];
 
       const results = await Promise.all(
-        tableNames.map(table => supabaseClient.from(table).select("*"))
+        tableNames.map(async table => {
+          const result = await supabaseClient.from(table).select("*");
+          return [table, result];
+        })
       );
 
-      const failed = results.find(result => result.error);
-      if (failed) throw failed.error;
+      const failed = results.find(([, result]) => result.error);
+      if (failed) throw failed[1].error;
 
-      const [
-        ordersResult,
-        customersResult,
-        productsResult,
-        documentsResult,
-        paymentsResult,
-        productionResult,
-        shipmentsResult,
-        auditLogsResult,
-        settingsResult
-      ] = results;
+      const resultByTable = Object.fromEntries(
+        results.map(([table, result]) => [table, result.data || []])
+      );
 
-      const settingsRow = settingsResult.data?.[0];
+      const settingsRow = resultByTable.app_settings?.[0];
 
       return {
-        orders: fromDataRows(ordersResult.data),
-        customers: fromDataRows(customersResult.data),
-        products: fromDataRows(productsResult.data),
-        documents: fromDataRows(documentsResult.data),
-        payments: fromDataRows(paymentsResult.data),
-        production: fromDataRows(productionResult.data),
-        shipments: fromDataRows(shipmentsResult.data),
-        auditLogs: fromDataRows(auditLogsResult.data),
-        settings: settingsRow?.data || {
-          companyName: settingsRow?.company_name || "Evergen Technologies Co., Ltd.",
-          taxId: settingsRow?.tax_id || "0105562089410",
-          prefix: settingsRow?.order_prefix || "EVG-202502-"
-        }
+        orders: fromDataRows(resultByTable.orders),
+        customers: fromDataRows(resultByTable.customers),
+        products: fromDataRows(resultByTable.products),
+        documents: isAdmin ? fromDataRows(resultByTable.documents) : [],
+        payments: isAdmin ? fromDataRows(resultByTable.payments) : [],
+        production: fromDataRows(resultByTable.production),
+        shipments: fromDataRows(resultByTable.shipments),
+        auditLogs: isAdmin ? fromDataRows(resultByTable.audit_logs) : [],
+        settings: isAdmin
+          ? (settingsRow?.data || {
+              companyName: settingsRow?.company_name || DEFAULT_SETTINGS.companyName,
+              taxId: settingsRow?.tax_id || DEFAULT_SETTINGS.taxId,
+              prefix: settingsRow?.order_prefix || DEFAULT_SETTINGS.prefix
+            })
+          : DEFAULT_SETTINGS
       };
     }
 
@@ -465,7 +489,7 @@
             avatar: role === "Admin" ? "A" : "G"
           };
 
-          const erpData = await fetchERPData();
+          const erpData = await fetchERPData(role);
 
           setUser(activeUser);
           setOrdersState(erpData.orders);
@@ -568,6 +592,14 @@
       const DEEP_ROUTES = ["orders_new", "order_detail"];
 
       const navigate = (route, id) => {
+        if (user?.role === "Guest" && !GUEST_ALLOWED_ROUTES.has(route)) {
+          alert("บัญชี Guest ไม่มีสิทธิ์เข้าถึงหน้านี้");
+          setCurrentRoute("dashboard");
+          setRouteHistory([]);
+          setSelectedOrderId(null);
+          return;
+        }
+
         if (route === currentRoute && !id) return;
 
         const isGoingDeeper = DEEP_ROUTES.includes(route);
@@ -641,6 +673,10 @@
     }
 
     function MainRouteHandler(props) {
+      if (props.user?.role === "Guest" && !GUEST_ALLOWED_ROUTES.has(props.route)) {
+        return <DashboardPage {...props} />;
+      }
+
       switch(props.route) {
         case "dashboard": return <DashboardPage {...props} />;
         case "orders": return <OrdersPage {...props} />;
@@ -670,6 +706,17 @@
         { id: "reports", label: "รายงาน", icon: "⌁" }, { id: "payments", label: "การชำระเงิน", icon: "฿" }, { id: "production", label: "การผลิต", icon: "⚙" },
         { id: "shipping", label: "การจัดส่ง", icon: "⇢" }, { id: "settings", label: "ตั้งค่า", icon: "⚒" }, { id: "users", label: "ผู้ใช้งาน", icon: "♟" }, { id: "audit_log", label: "ประวัติการแก้ไข", icon: "↻" }
       ];
+      const visibleNavItems = user?.role === "Guest"
+        ? navItems.filter(item => [
+            "dashboard",
+            "orders",
+            "customers",
+            "products",
+            "production",
+            "shipping"
+          ].includes(item.id))
+        : navItems;
+
       const labels = Object.fromEntries(navItems.map(x => [x.id, x.label]));
       const currentLabel = currentRoute === "order_detail" ? selectedOrderId || "รายละเอียดออเดอร์" : labels[currentRoute] || currentRoute;
 
@@ -681,7 +728,7 @@
                 <EvergenLogo className={collapsed ? "w-12 h-12" : "w-full max-w-[158px] h-[76px]"} />
               </div>
               <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5 max-h-[70vh]">
-                {navItems.map((item) => (
+                {visibleNavItems.map((item) => (
                   <button key={item.id} onClick={() => onNavigate(item.id)} title={collapsed ? item.label : ""} className={`w-full flex items-center gap-3 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${currentRoute === item.id ? 'bg-gold text-white shadow-md' : 'hover:bg-slate-800 text-slate-300'}`}>
                     <span className="w-4 text-center">{item.icon}</span>{!collapsed && <span className="truncate">{item.label}</span>}
                   </button>
@@ -706,7 +753,14 @@
               </div>
               <div className="flex items-center gap-4"><div className="text-[11px] font-bold text-slate-500 bg-slate-100 py-1.5 px-3 rounded-md">สิทธิ์: {user?.role}</div></div>
             </header>
-            <main className="flex-1 overflow-y-auto p-6 relative app-canvas">{children}</main>
+            <main className="flex-1 overflow-y-auto p-6 relative app-canvas">
+              {user?.role === "Guest" && (
+                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] font-bold text-amber-800">
+                  โหมด Guest: ดูข้อมูลได้เท่านั้น ไม่สามารถเพิ่ม แก้ไข หรือลบข้อมูลได้
+                </div>
+              )}
+              {children}
+            </main>
           </div>
         </div>
       );
